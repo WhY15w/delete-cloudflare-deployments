@@ -4,36 +4,76 @@ import time
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 
-# 从环境变量获取配置
-API_TOKEN = os.getenv('CF_API_TOKEN')
-ACCOUNT_ID = os.getenv('CF_ACCOUNT_ID')
-DRY_RUN = os.getenv('DRY_RUN', 'false').lower() == 'true'
-KEEP_COUNT = int(os.getenv('KEEP_COUNT', '10'))
+# 配置类
+class Config:
+    """清理脚本配置"""
+    def __init__(self):
+        self.api_token = os.getenv('CF_API_TOKEN')
+        self.account_id = os.getenv('CF_ACCOUNT_ID')
+        self.dry_run = os.getenv('DRY_RUN', 'false').lower() == 'true'
+        self.keep_count = int(os.getenv('KEEP_COUNT', '10'))
+        self.request_timeout = int(os.getenv('REQUEST_TIMEOUT', '30'))
+        self.rate_limit_delay = float(os.getenv('RATE_LIMIT_DELAY', '0.5'))
+        self.max_retries = int(os.getenv('MAX_RETRIES', '3'))
+        self.retry_delay = int(os.getenv('RETRY_DELAY', '2'))
+        self.batch_size = int(os.getenv('BATCH_SIZE', '5'))  # 批量处理大小
+    
+    def validate(self) -> bool:
+        """验证配置"""
+        if not self.api_token:
+            print("❌ 错误：CF_API_TOKEN 环境变量未设置")
+            return False
+        if not self.account_id:
+            print("❌ 错误：CF_ACCOUNT_ID 环境变量未设置")
+            return False
+        if self.keep_count < 1:
+            print("❌ 错误：KEEP_COUNT 必须大于 0")
+            return False
+        return True
+    
+    def print_config(self):
+        """打印配置信息"""
+        print("✅ 环境变量验证通过")
+        print(f"🔧 配置信息:")
+        print(f"   - 运行模式: {'🔍 预览模式（不会实际删除）' if self.dry_run else '🗑️ 实际删除模式'}")
+        print(f"   - 保留部署数: {self.keep_count} 个最新部署")
+        print(f"   - 请求超时: {self.request_timeout} 秒")
+        print(f"   - 请求间隔: {self.rate_limit_delay} 秒")
+        print(f"   - 最大重试: {self.max_retries} 次")
+        print(f"   - 批量大小: {self.batch_size} 个/批")
+
+# 全局配置实例
+config = Config()
+
+# 从环境变量获取配置（向后兼容）
+API_TOKEN = config.api_token
+ACCOUNT_ID = config.account_id
+DRY_RUN = config.dry_run
+KEEP_COUNT = config.keep_count
 
 # API 配置
-REQUEST_TIMEOUT = 30
-RATE_LIMIT_DELAY = 0.5  # 请求间隔，避免触发API限流
-MAX_RETRIES = 3
-RETRY_DELAY = 2
+REQUEST_TIMEOUT = config.request_timeout
+RATE_LIMIT_DELAY = config.rate_limit_delay
+MAX_RETRIES = config.max_retries
+RETRY_DELAY = config.retry_delay
 
 def check_environment() -> bool:
     """检查环境变量是否已正确设置"""
-    required_vars = ['CF_API_TOKEN', 'CF_ACCOUNT_ID']
-    missing_vars = [var for var in required_vars if not os.getenv(var)]
-    
-    if missing_vars:
-        print("\n❌ 错误：未找到以下环境变量：")
-        for var in missing_vars:
-            print(f"   - {var}")
+    if not config.validate():
         print("\n请确保环境变量已正确设置")
+        print("📋 需要的环境变量:")
+        print("   - CF_API_TOKEN: Cloudflare API Token")
+        print("   - CF_ACCOUNT_ID: Cloudflare Account ID")
+        print("\n🔧 可选的环境变量:")
+        print("   - DRY_RUN: 设置为 'true' 启用预览模式 (默认: false)")
+        print("   - KEEP_COUNT: 保留的最新部署数量 (默认: 10)")
+        print("   - REQUEST_TIMEOUT: API请求超时时间 (默认: 30)")
+        print("   - RATE_LIMIT_DELAY: 请求间隔时间 (默认: 0.5)")
+        print("   - MAX_RETRIES: 最大重试次数 (默认: 3)")
+        print("   - BATCH_SIZE: 批量处理大小 (默认: 5)")
         return False
     
-    print("✅ 环境变量验证通过")
-    if DRY_RUN:
-        print("🔍 运行模式：预览模式（不会实际删除）")
-    else:
-        print("🗑️ 运行模式：实际删除模式")
-    print(f"📊 保留最新 {KEEP_COUNT} 个部署")
+    config.print_config()
     return True
 
 def make_api_request(url: str, method: str = 'GET', **kwargs) -> Optional[Dict[str, Any]]:
@@ -125,6 +165,7 @@ def delete_deployment(project_name: str, deployment_id: str) -> bool:
 
 def main():
     """主函数"""
+    start_time = time.time()
     print("🚀 开始清理 Cloudflare Pages 部署记录")
     print("=" * 50)
     
@@ -147,6 +188,7 @@ def main():
         print("-" * 40)
         
         project_deleted = 0
+        project_start_time = time.time()
         
         while True:
             # 获取该项目的部署记录
@@ -204,7 +246,7 @@ def main():
                     break
                     
                 # 避免过快请求
-                if j % 5 == 0:  # 每删除5个休息一下
+                if j % config.batch_size == 0:  # 根据配置的批量大小休息
                     time.sleep(1)
             
             print(f"🎯 本轮删除了 {batch_deleted} 个部署")
@@ -215,13 +257,18 @@ def main():
                 break
         
         processed_projects += 1
-        print(f"✅ 项目 {project_name} 处理完成，共删除 {project_deleted} 个部署")
+        project_time = time.time() - project_start_time
+        print(f"✅ 项目 {project_name} 处理完成，共删除 {project_deleted} 个部署 (耗时 {project_time:.1f}s)")
     
     # 输出最终统计
+    total_time = time.time() - start_time
     print("\n" + "=" * 50)
     print("📊 清理完成统计:")
     print(f"   - 处理项目数: {processed_projects}/{total_projects}")
     print(f"   - 总删除数量: {total_deleted} 个部署")
+    print(f"   - 总耗时: {total_time:.1f} 秒")
+    if total_deleted > 0:
+        print(f"   - 平均速度: {total_deleted/total_time:.1f} 个/秒")
     if DRY_RUN:
         print("   - 模式: 🔍 预览模式（未实际删除）")
     else:
